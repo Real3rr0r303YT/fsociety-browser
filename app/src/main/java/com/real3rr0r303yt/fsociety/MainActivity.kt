@@ -2,6 +2,7 @@ package com.real3rr0r303yt.fsociety
 
 import android.os.Bundle
 import android.os.Process
+import android.util.Log
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -66,8 +67,11 @@ import com.real3rr0r303yt.fsociety.tor.TorState
 import com.real3rr0r303yt.fsociety.tor.TorStatus
 import com.real3rr0r303yt.fsociety.ui.theme.Fs
 import com.real3rr0r303yt.fsociety.ui.theme.FsocietyTheme
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.mozilla.geckoview.GeckoView
+
+private const val TAG = "fsociety/UI"
 
 class MainActivity : ComponentActivity() {
 
@@ -79,11 +83,12 @@ class MainActivity : ComponentActivity() {
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         enableEdgeToEdge()
 
+        Log.i(TAG, "MainActivity created - starting tor")
         app.tor.start()
 
         setContent {
             FsocietyTheme {
-                BrowserRoot(tor = app.tor, obtainBrowser = app::browser, onWipeAndExit = ::wipeAndExit)
+                BrowserRoot(app = app, onWipeAndExit = ::wipeAndExit)
             }
         }
     }
@@ -109,14 +114,17 @@ class MainActivity : ComponentActivity() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun BrowserRoot(
-    tor: TorManager,
-    obtainBrowser: (String, Int) -> TabManager,
-    onWipeAndExit: () -> Unit,
-) {
+private fun BrowserRoot(app: FsocietyApp, onWipeAndExit: () -> Unit) {
+    val tor = app.tor
     val status by tor.status.collectAsStateWithLifecycle()
+    val engine by app.engine.collectAsStateWithLifecycle()
+
     // Gecko is only instantiated after Tor has a live SOCKS port — nothing can load before.
-    val browser = if (status.ready) remember(status.socksPort) { obtainBrowser(status.socksHost, status.socksPort) } else null
+    LaunchedEffect(status.ready, engine) {
+        if (status.ready && engine is EngineState.Idle) app.startEngine(status.socksHost, status.socksPort)
+    }
+
+    val browser = (engine as? EngineState.Ready)?.tabs
     val tab = browser?.active
 
     BackHandler {
@@ -144,7 +152,16 @@ private fun BrowserRoot(
         LoadBar(tab)
 
         Box(Modifier.weight(1f).fillMaxWidth().border(1.dp, Fs.GhostGreen)) {
-            if (tab != null) GeckoHost(tab) else BootConsole(status, onRetry = { tor.start() })
+            val onRetry = { if (!status.ready) tor.start() else app.resetEngine() }
+            // GeckoView is attached only once the proxy is up AND the session is open on the runtime.
+            if (status.ready && tab != null && tab.opened) {
+                GeckoHost(tab)
+                // Gecko needs an attached surface to paint, so the console overlays it until the
+                // first frame is composited instead of showing an empty black surface.
+                if (!tab.painted) BootConsole(status, engine, onRetry)
+            } else {
+                BootConsole(status, engine, onRetry)
+            }
         }
     }
 }
@@ -353,44 +370,79 @@ private fun LoadBar(tab: BrowserTab?) {
 @Composable
 private fun GeckoHost(tab: BrowserTab) {
     AndroidView(
-        factory = { ctx -> GeckoView(ctx) },
+        factory = { ctx ->
+            Log.i(TAG, "GeckoView created")
+            GeckoView(ctx).apply { setBackgroundColor(android.graphics.Color.BLACK) }
+        },
         update = { view ->
-            if (view.session !== tab.session) {
-                view.releaseSession()
-                view.setSession(tab.session)
+            if (view.session !== tab.session && tab.session.isOpen) {
+                try {
+                    view.releaseSession()
+                    view.setSession(tab.session)
+                    Log.i(TAG, "GeckoView bound to tab ${tab.id}")
+                } catch (e: Exception) {
+                    Log.e(TAG, "binding tab ${tab.id} to GeckoView failed", e)
+                }
             }
         },
+        onRelease = { view -> view.releaseSession() },
         modifier = Modifier.fillMaxSize(),
     )
 }
 
+private val SPINNER = charArrayOf('|', '/', '-', '\\')
+
 @Composable
-private fun BootConsole(s: TorStatus, onRetry: () -> Unit) {
-    val blink by rememberInfiniteTransition(label = "cursor").animateFloat(
-        initialValue = 1f, targetValue = 0f,
-        animationSpec = infiniteRepeatable(tween(500), RepeatMode.Reverse), label = "blink",
-    )
-    val bar = (s.bootstrap / 5).coerceIn(0, 20).let { "#".repeat(it) + ".".repeat(20 - it) }
-    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        BootLine("[*] fsociety-browser :: initializing")
-        BootLine("[*] engine: GeckoView (locked until circuit is up)")
-        BootLine("[*] mode: ${s.mode.name.lowercase()}  socks5://${s.socksHost}:${if (s.socksPort > 0) s.socksPort else "auto"}")
-        BootLine("[*] bootstrap [$bar] ${s.bootstrap}%")
-        BootLine("[>] ${s.summary}", Fs.DimGreen)
-        when (s.state) {
-            TorState.ERROR, TorState.OFF -> {
-                BootLine("[!] no circuit. all traffic is blocked. nothing leaks.", Fs.BloodRed)
-                Text(
-                    "[retry]",
-                    color = Fs.NeonGreen, fontFamily = Fs.Mono, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.clickable(onClick = onRetry).padding(top = 8.dp),
-                )
-            }
-            else -> BootLine("[!] network locked until tor reports CIRCUIT_ESTABLISHED", Fs.Amber)
+private fun BootConsole(s: TorStatus, engine: EngineState, onRetry: () -> Unit) {
+    var frame by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(120)
+            frame++
         }
-        Text("_", color = Fs.NeonGreen, fontFamily = Fs.Mono, modifier = Modifier.alpha(blink))
+    }
+    val spin = SPINNER[frame % SPINNER.size]
+    val dots = ".".repeat(frame / 4 % 4)
+    val bar = (s.bootstrap / 5).coerceIn(0, 20).let { "#".repeat(it) + ".".repeat(20 - it) }
+    val torDown = s.state == TorState.ERROR || s.state == TorState.OFF
+
+    Column(
+        Modifier.fillMaxSize().background(Fs.Black).padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        BootLine("[*] fsociety-browser :: boot sequence")
+        BootLine("[*] mode: ${s.mode.name.lowercase()}  socks5://${s.socksHost}:${if (s.socksPort > 0) s.socksPort else "auto"}")
+        BootLine("[*] tor  [$bar] ${s.bootstrap}%")
+        BootLine("[>] ${s.summary}", Fs.DimGreen)
+        Spacer(Modifier.height(8.dp))
+        when {
+            torDown -> {
+                BootLine("[!] no circuit. all traffic is blocked. nothing leaks.", Fs.BloodRed)
+                RetryButton(onRetry)
+            }
+            !s.ready -> PhaseLine("$spin Initializing Tor Circuit$dots")
+            engine is EngineState.Failed -> {
+                BootLine("[!] GeckoView failed to start: ${engine.reason}", Fs.BloodRed)
+                BootLine("[!] adb logcat -s fsociety/App fsociety/Gecko GeckoView", Fs.DimGreen)
+                RetryButton(onRetry)
+            }
+            engine !is EngineState.Ready -> PhaseLine("$spin Booting GeckoView engine$dots")
+            else -> PhaseLine("$spin Opening session -> ${TabManager.HOME}$dots")
+        }
     }
 }
+
+@Composable
+private fun PhaseLine(t: String) =
+    Text(t, color = Fs.NeonGreen, fontFamily = Fs.Mono, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+
+@Composable
+private fun RetryButton(onRetry: () -> Unit) =
+    Text(
+        "[retry]",
+        color = Fs.NeonGreen, fontFamily = Fs.Mono, fontWeight = FontWeight.Bold,
+        modifier = Modifier.clickable(onClick = onRetry).padding(top = 8.dp),
+    )
 
 @Composable
 private fun BootLine(t: String, c: Color = Fs.NeonGreen) =
