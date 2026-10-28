@@ -14,9 +14,6 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0-alpha"
-
-        // Ship only real-device ABIs; GeckoView + tor native libs are large.
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 
     buildTypes {
@@ -30,6 +27,7 @@ android {
         }
     }
 
+    // One APK per real-device ABI; GeckoView + tor native libs are large.
     splits {
         abi {
             isEnable = true
