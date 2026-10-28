@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Terminal prompt glyph ">_" in neon green with a dark-red onion ring. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:strokeColor="#FF8B0000"
+        android:strokeWidth="3"
+        android:pathData="M54,24a30,30 0,1 1,0 60a30,30 0,1 1,0 -60z" />
+    <path
+        android:strokeColor="#FF00FF66"
+        android:strokeWidth="5"
+        android:strokeLineCap="square"
+        android:pathData="M38,42 L50,54 L38,66" />
+    <path
+        android:strokeColor="#FF00FF66"
+        android:strokeWidth="5"
+        android:strokeLineCap="square"
+        android:pathData="M56,68 L72,68" />
+</vector>
