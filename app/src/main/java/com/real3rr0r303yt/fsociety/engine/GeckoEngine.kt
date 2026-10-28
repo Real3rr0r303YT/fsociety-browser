@@ -1,6 +1,7 @@
 package com.real3rr0r303yt.fsociety.engine
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import org.mozilla.geckoview.ContentBlocking
@@ -20,6 +21,8 @@ import kotlin.coroutines.resume
  * The profile directory is wiped on every cold start and on exit.
  */
 object GeckoEngine {
+
+    private const val TAG = "fsociety/Gecko"
 
     @Volatile private var runtime: GeckoRuntime? = null
 
@@ -121,6 +124,7 @@ object GeckoEngine {
         val profile = profileDir(app).apply { deleteRecursively(); mkdirs() }
         File(profile, "user.js").writeText(prefs.toUserJs())
         val config = configFile(app).apply { writeText(prefs.toGeckoViewYaml()) }
+        Log.i(TAG, "wrote ${prefs.size} hardened prefs (socks5://$socksHost:$socksPort) to ${profile.absolutePath}")
 
         val contentBlocking = ContentBlocking.Settings.Builder()
             .antiTracking(ContentBlocking.AntiTracking.STRICT)
@@ -145,7 +149,12 @@ object GeckoEngine {
             .aboutConfigEnabled(false)
             .build()
 
-        return GeckoRuntime.create(app, settings).also { runtime = it }
+        Log.i(TAG, "creating GeckoRuntime")
+        return GeckoRuntime.create(app, settings).also { rt ->
+            rt.delegate = GeckoRuntime.Delegate { Log.e(TAG, "GeckoRuntime shut down unexpectedly") }
+            runtime = rt
+            Log.i(TAG, "GeckoRuntime created")
+        }
     }
 
     /** Clears every cookie, cache, storage bucket, permission and site setting Gecko holds. */

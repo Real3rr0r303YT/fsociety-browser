@@ -67,6 +67,7 @@ class TorManager(context: Context) {
         private const val TAG = "fsociety/Tor"
         const val SOCKS_HOST = "127.0.0.1"
         const val ORBOT_SOCKS_PORT = 9050
+        private const val BOOTSTRAP_TIMEOUT_MS = 120_000L
         private const val CHECK_URL = "https://check.torproject.org/api/ip"
         private val PROGRESS = Regex("""PROGRESS=(\d+)""")
         private val SUMMARY = Regex("""SUMMARY="([^"]*)"""")
@@ -84,7 +85,9 @@ class TorManager(context: Context) {
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            when (intent.getStringExtra(TorService.EXTRA_STATUS)) {
+            val torStatus = intent.getStringExtra(TorService.EXTRA_STATUS)
+            Log.i(TAG, "TorService status: $torStatus")
+            when (torStatus) {
                 TorService.STATUS_STARTING -> _status.update { it.copy(state = TorState.STARTING) }
                 TorService.STATUS_ON -> onEmbeddedTorOn()
                 TorService.STATUS_STOPPING -> _status.update { it.copy(state = TorState.STOPPING, verified = false) }
@@ -98,11 +101,13 @@ class TorManager(context: Context) {
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             service = (binder as TorService.LocalBinder).service
+            Log.i(TAG, "bound to TorService")
             startBootstrapPolling()
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
             service = null
+            Log.e(TAG, "TorService disconnected")
             _status.update { it.copy(state = TorState.ERROR, summary = "tor service died", verified = false) }
         }
     }
@@ -110,6 +115,9 @@ class TorManager(context: Context) {
     /** Idempotent: safe to call from every Activity.onCreate. */
     fun start(mode: TorMode = TorMode.EMBEDDED) {
         if (_status.value.state == TorState.ON || _status.value.state == TorState.STARTING) return
+        // Retry after ERROR/OFF: drop the old binding so TorService is really started again.
+        if (bound || receiverRegistered) stop()
+        Log.i(TAG, "starting tor (mode=$mode)")
         _status.value = TorStatus(mode = mode, state = TorState.STARTING, summary = "starting")
         when (mode) {
             TorMode.EMBEDDED -> startEmbedded()
@@ -125,13 +133,17 @@ class TorManager(context: Context) {
         }
         if (!bound) {
             bound = app.bindService(Intent(app, TorService::class.java), connection, Context.BIND_AUTO_CREATE)
-            if (!bound) _status.update { it.copy(state = TorState.ERROR, summary = "unable to bind TorService") }
+            if (!bound) {
+                Log.e(TAG, "bindService(TorService) returned false")
+                _status.update { it.copy(state = TorState.ERROR, summary = "unable to bind TorService") }
+            }
         }
     }
 
     private fun attachToOrbot() = scope.launch {
         _status.update { it.copy(summary = "probing orbot socks5 @ $SOCKS_HOST:$ORBOT_SOCKS_PORT") }
         if (!probeSocks5(SOCKS_HOST, ORBOT_SOCKS_PORT)) {
+            Log.e(TAG, "no SOCKS5 proxy answering on $SOCKS_HOST:$ORBOT_SOCKS_PORT")
             _status.update { it.copy(state = TorState.ERROR, summary = "no SOCKS5 proxy on :$ORBOT_SOCKS_PORT - start Orbot") }
             return@launch
         }
@@ -140,13 +152,22 @@ class TorManager(context: Context) {
     }
 
     private fun onEmbeddedTorOn() {
+        if (_status.value.state == TorState.ON) return
         bootstrapJob?.cancel()
         scope.launch {
-            val port = service?.socksPort?.takeIf { it > 0 } ?: socksPortFromControl() ?: -1
+            // STATUS_ON can race the service binding; give the port a few seconds to show up.
+            var port = -1
+            for (attempt in 1..10) {
+                port = TorService.socksPort.takeIf { it > 0 } ?: socksPortFromControl() ?: -1
+                if (port > 0) break
+                delay(500)
+            }
             if (port <= 0) {
+                Log.e(TAG, "tor is ON but the SOCKS port is unknown")
                 _status.update { it.copy(state = TorState.ERROR, summary = "tor is up but SOCKS port is unknown") }
                 return@launch
             }
+            Log.i(TAG, "circuit established - SOCKS5 proxy at $SOCKS_HOST:$port")
             _status.update {
                 it.copy(state = TorState.ON, bootstrap = 100, summary = "circuit established", socksPort = port)
             }
@@ -154,17 +175,42 @@ class TorManager(context: Context) {
         }
     }
 
-    /** Polls `GETINFO status/bootstrap-phase` until the first circuit is built. */
+    /**
+     * Polls `GETINFO status/bootstrap-phase` until the first circuit is built. Also the fallback
+     * for a missed STATUS_ON broadcast (100% for 5 s ⇒ treat as ON) and the bootstrap timeout.
+     */
     private fun startBootstrapPolling() {
         bootstrapJob?.cancel()
         bootstrapJob = scope.launch {
+            val startedAt = System.currentTimeMillis()
+            var doneSince = 0L
+            var lastLogged = -1
             while (isActive && _status.value.state == TorState.STARTING) {
                 service?.getInfo("status/bootstrap-phase")?.let { phase ->
                     val pct = PROGRESS.find(phase)?.groupValues?.get(1)?.toIntOrNull()
                     val summary = SUMMARY.find(phase)?.groupValues?.get(1)
+                    if (pct != null && pct != lastLogged) {
+                        Log.i(TAG, "bootstrap $pct% - $summary")
+                        lastLogged = pct
+                    }
                     _status.update {
                         it.copy(bootstrap = pct ?: it.bootstrap, summary = summary ?: it.summary)
                     }
+                    if (pct == 100) {
+                        if (doneSince == 0L) doneSince = System.currentTimeMillis()
+                        if (System.currentTimeMillis() - doneSince > 5_000) {
+                            Log.w(TAG, "bootstrap at 100% but no STATUS_ON broadcast - continuing anyway")
+                            onEmbeddedTorOn()
+                            return@launch
+                        }
+                    }
+                }
+                if (System.currentTimeMillis() - startedAt > BOOTSTRAP_TIMEOUT_MS) {
+                    Log.e(TAG, "bootstrap timed out at ${_status.value.bootstrap}%")
+                    _status.update {
+                        it.copy(state = TorState.ERROR, summary = "bootstrap timeout at ${it.bootstrap}% - check network")
+                    }
+                    return@launch
                 }
                 delay(500)
             }
@@ -197,10 +243,11 @@ class TorManager(context: Context) {
             val body = conn.inputStream.bufferedReader().use { it.readText() }
             conn.disconnect()
             val json = JSONObject(body)
-            _status.update {
-                it.copy(exitIp = json.optString("IP", "?"), verified = json.optBoolean("IsTor", false))
-            }
-        } catch (e: IOException) {
+            val ip = json.optString("IP", "?")
+            val isTor = json.optBoolean("IsTor", false)
+            Log.i(TAG, "exit check: IsTor=$isTor")
+            _status.update { it.copy(exitIp = ip, verified = isTor) }
+        } catch (e: Exception) { // IOException or a malformed JSON reply - never crash the app
             Log.w(TAG, "exit verification failed: ${e.message}")
             _status.update { it.copy(exitIp = null, verified = false) }
         }
@@ -220,6 +267,7 @@ class TorManager(context: Context) {
     }
 
     fun stop() {
+        Log.i(TAG, "stopping tor")
         bootstrapJob?.cancel()
         if (bound) {
             runCatching { app.unbindService(connection) }
