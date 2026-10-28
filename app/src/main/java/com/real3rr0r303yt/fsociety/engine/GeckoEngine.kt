@@ -77,7 +77,8 @@ object GeckoEngine {
         // ── Fingerprinting / canvas ─────────────────────────────────────────────────
         "privacy.resistFingerprinting" to true,          // canvas prompts, UA/timezone/screen spoofing
         "privacy.resistFingerprinting.block_mozAddonManager" to true,
-        "privacy.fingerprintingProtection" to true,
+        "privacy.fingerprintingProtection" to true,      // no Builder API in GeckoView; set via pref
+        "privacy.fingerprintingProtection.pbmode" to true,
         "privacy.firstparty.isolate" to true,
         "privacy.partition.network_state" to true,
         "webgl.disabled" to true,
@@ -136,8 +137,6 @@ object GeckoEngine {
             .arguments(arrayOf("-profile", profile.absolutePath))
             .configFilePath(config.absolutePath)
             .allowInsecureConnections(GeckoRuntimeSettings.HTTPS_ONLY)
-            .fingerprintingProtection(true)
-            .fingerprintingProtectionPrivateBrowsing(true)
             .globalPrivacyControlEnabled(true)
             .contentBlocking(contentBlocking)
             .preferredColorScheme(GeckoRuntimeSettings.COLOR_SCHEME_DARK)
