@@ -1,0 +1,43 @@
+name: release
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build APKs
+        run: ./gradlew --no-daemon assembleDebug
+      - name: Rename APKs
+        run: |
+          mkdir -p dist
+          for f in app/build/outputs/apk/debug/*.apk; do
+            abi=$(basename "$f" .apk | sed -e 's/^app-//' -e 's/-debug$//')
+            cp "$f" "dist/fsociety-browser-${GITHUB_REF_NAME}-${abi}.apk"
+          done
+          (cd dist && sha256sum *.apk > SHA256SUMS.txt)
+          ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
+          generate_release_notes: true
+          body: |
+            ```
+            fsociety@root:~# ./install --via tor --no-logs
+            ```
+            **Which APK?** Almost every modern phone: `arm64-v8a`. Older 32-bit phones: `armeabi-v7a`. Emulators: `x86_64`.
+
+            ⚠️ Alpha build, signed with a debug key. Not a replacement for Tor Browser if your safety depends on anonymity.
+            Verify downloads against `SHA256SUMS.txt`.
