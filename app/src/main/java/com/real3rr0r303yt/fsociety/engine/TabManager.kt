@@ -7,12 +7,15 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import android.util.Base64
 import org.mozilla.geckoview.AllowOrDeny
+import org.mozilla.geckoview.ContentBlocking
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoSession.PermissionDelegate.ContentPermission
 import org.mozilla.geckoview.GeckoSessionSettings
+import org.mozilla.geckoview.WebRequestError
 
 /** One in-memory tab. Nothing about it is ever written to disk. */
 class BrowserTab(val id: Int, val session: GeckoSession) {
@@ -27,6 +30,8 @@ class BrowserTab(val id: Int, val session: GeckoSession) {
     var opened by mutableStateOf(false)
     /** Gecko has composited a first frame; until then the UI keeps the loading console on top. */
     var painted by mutableStateOf(false)
+    /** Last blocked or failed navigation, shown under the prompt; cleared by the next page start. */
+    var lastError by mutableStateOf<String?>(null)
     internal var restarts = 0
 }
 
@@ -102,7 +107,11 @@ class TabManager(
 
     fun load(raw: String) {
         val tab = active ?: newTab(null)
-        tab.session.loadUri(resolveInput(raw))
+        val target = resolveInput(raw)
+        tab.lastError = null
+        // Only the scheme is logged: zero-log means no browsing history in logcat either.
+        Log.i(TAG, "tab ${tab.id}: navigate (${Uri.parse(target).scheme}, onion=${Uri.parse(target).host?.endsWith(".onion") == true})")
+        tab.session.loadUri(target)
     }
 
     private fun restart(tab: BrowserTab) {
@@ -133,7 +142,11 @@ class TabManager(
     private fun wireDelegates(tab: BrowserTab) = with(tab.session) {
         progressDelegate = object : GeckoSession.ProgressDelegate {
             override fun onPageStart(session: GeckoSession, url: String) {
-                tab.url = url
+                // Our own data: error page must not replace the URL the user tried to open.
+                if (!url.startsWith("data:")) {
+                    tab.url = url
+                    tab.lastError = null
+                }
                 tab.loading = true
                 tab.opened = true
                 if (pendingFocus === tab) {
@@ -145,7 +158,7 @@ class TabManager(
             override fun onPageStop(session: GeckoSession, success: Boolean) {
                 tab.loading = false
                 tab.painted = true // also covers error pages that never report a first paint
-                if (!success) Log.w(TAG, "tab ${tab.id}: load failed for ${tab.url}")
+                if (!success) Log.w(TAG, "tab ${tab.id}: page load did not complete")
             }
 
             override fun onProgressChange(session: GeckoSession, progress: Int) {
@@ -198,9 +211,29 @@ class TabManager(
                 request: GeckoSession.NavigationDelegate.LoadRequest,
             ): GeckoResult<AllowOrDeny> {
                 val scheme = Uri.parse(request.uri).scheme?.lowercase()
-                val allowed = torReady() && scheme in ALLOWED_SCHEMES
-                if (!allowed) Log.w(TAG, "blocked load (torReady=${torReady()}, scheme=$scheme)")
+                val ready = torReady()
+                val allowed = ready && scheme in ALLOWED_SCHEMES
+                if (!allowed) {
+                    val why = if (!ready) "tor circuit not ready" else "scheme '$scheme' not allowed"
+                    Log.w(TAG, "tab ${tab.id}: blocked navigation - $why")
+                    tab.lastError = "blocked: $why"
+                }
                 return GeckoResult.fromValue(if (allowed) AllowOrDeny.ALLOW else AllowOrDeny.DENY)
+            }
+
+            // Network failures (DNS at the exit, proxy refused, timeout, TLS …) get a terminal-style
+            // error page and a red line under the prompt instead of a silent blank page.
+            override fun onLoadError(
+                session: GeckoSession,
+                uri: String?,
+                error: WebRequestError,
+            ): GeckoResult<String> {
+                val name = errorName(error.code)
+                Log.w(TAG, "tab ${tab.id}: load error $name (category=${error.category}, code=${error.code})")
+                tab.lastError = "error: $name"
+                tab.loading = false
+                tab.painted = true
+                return GeckoResult.fromValue(errorPage(name, uri))
             }
 
             // target=_blank / window.open → new in-memory tab (Gecko opens the returned session).
@@ -210,6 +243,13 @@ class TabManager(
                 tabs += tab
                 pendingFocus = tab
                 return GeckoResult.fromValue(tab.session)
+            }
+        }
+
+        // ETP / ad blocking: count what Gecko blocked (category only, never the URL).
+        contentBlockingDelegate = object : ContentBlocking.Delegate {
+            override fun onContentBlocked(session: GeckoSession, event: ContentBlocking.BlockEvent) {
+                BlockStats.record(event)
             }
         }
 
@@ -235,4 +275,33 @@ class TabManager(
             ) = callback.reject()
         }
     }
+}
+
+private fun errorName(code: Int): String = when (code) {
+    WebRequestError.ERROR_UNKNOWN_HOST -> "UNKNOWN_HOST (exit relay could not resolve the name)"
+    WebRequestError.ERROR_PROXY_CONNECTION_REFUSED -> "PROXY_CONNECTION_REFUSED (tor SOCKS5 not reachable)"
+    WebRequestError.ERROR_UNKNOWN_PROXY_HOST -> "UNKNOWN_PROXY_HOST"
+    WebRequestError.ERROR_CONNECTION_REFUSED -> "CONNECTION_REFUSED"
+    WebRequestError.ERROR_NET_TIMEOUT -> "NET_TIMEOUT (slow circuit - retry or [newnym])"
+    WebRequestError.ERROR_NET_RESET -> "NET_RESET"
+    WebRequestError.ERROR_OFFLINE -> "OFFLINE"
+    WebRequestError.ERROR_SECURITY_BAD_CERT -> "BAD_CERT"
+    WebRequestError.ERROR_SECURITY_SSL -> "SSL_ERROR"
+    else -> "0x" + Integer.toHexString(code)
+}
+
+private fun errorPage(name: String, uri: String?): String {
+    val safeUri = (uri ?: "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    val html = """
+        <!doctype html><html><head><meta charset="utf-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <style>body{background:#000;color:#00ff66;font:14px monospace;padding:16px;word-break:break-all}
+        .r{color:#ff1a3c}.d{color:#00a845}</style></head><body>
+        <p>fsociety@root:~# curl --socks5-hostname 127.0.0.1 $safeUri</p>
+        <p class="r">[!] load failed: $name</p>
+        <p class="d">[*] traffic stayed inside tor - nothing went out directly.</p>
+        <p class="d">[*] try again, or hit [newnym] for a fresh circuit.</p>
+        </body></html>
+    """.trimIndent()
+    return "data:text/html;charset=utf-8;base64," + Base64.encodeToString(html.toByteArray(), Base64.NO_WRAP)
 }
