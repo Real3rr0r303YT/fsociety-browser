@@ -3,6 +3,16 @@ name: release
 on:
   push:
     tags: [ 'v*' ]
+  # Manual start (Actions tab → release → Run workflow): creates the tag + release itself.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag, e.g. v0.1.0-alpha'
+        required: true
+        default: 'v0.1.0-alpha'
+
+env:
+  VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
 
 permissions:
   contents: write
@@ -24,14 +34,17 @@ jobs:
           mkdir -p dist
           for f in app/build/outputs/apk/debug/*.apk; do
             abi=$(basename "$f" .apk | sed -e 's/^app-//' -e 's/-debug$//')
-            cp "$f" "dist/fsociety-browser-${GITHUB_REF_NAME}-${abi}.apk"
+            cp "$f" "dist/fsociety-browser-${VERSION}-${abi}.apk"
           done
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
           ls -la dist
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.VERSION }}
+          name: fsociety-browser ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
           files: dist/*
-          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
+          prerelease: ${{ contains(env.VERSION, 'alpha') || contains(env.VERSION, 'beta') }}
           generate_release_notes: true
           body: |
             ```
