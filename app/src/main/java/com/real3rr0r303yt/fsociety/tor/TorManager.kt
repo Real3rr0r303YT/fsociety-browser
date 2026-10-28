@@ -50,6 +50,8 @@ data class TorStatus(
     val exitIp: String? = null,
     /** True only after check.torproject.org confirmed the request arrived via Tor. */
     val verified: Boolean = false,
+    /** SOCKS5 CONNECT by hostname succeeded ⇒ names are resolved at the exit, not on the device. */
+    val remoteDns: Boolean? = null,
 ) {
     val ready: Boolean get() = state == TorState.ON && socksPort > 0
 }
@@ -69,6 +71,8 @@ class TorManager(context: Context) {
         const val ORBOT_SOCKS_PORT = 9050
         private const val BOOTSTRAP_TIMEOUT_MS = 120_000L
         private const val CHECK_URL = "https://check.torproject.org/api/ip"
+        /** Clearweb host used to prove remote DNS + clearweb routing through the exit. */
+        private const val DNS_PROBE_HOST = "duckduckgo.com"
         private val PROGRESS = Regex("""PROGRESS=(\d+)""")
         private val SUMMARY = Regex("""SUMMARY="([^"]*)"""")
     }
@@ -149,6 +153,7 @@ class TorManager(context: Context) {
         }
         _status.update { it.copy(state = TorState.ON, bootstrap = 100, summary = "orbot proxy up", socksPort = ORBOT_SOCKS_PORT) }
         verifyExit()
+        verifyRemoteDns()
     }
 
     private fun onEmbeddedTorOn() {
@@ -172,6 +177,7 @@ class TorManager(context: Context) {
                 it.copy(state = TorState.ON, bootstrap = 100, summary = "circuit established", socksPort = port)
             }
             verifyExit()
+            verifyRemoteDns()
         }
     }
 
@@ -253,6 +259,19 @@ class TorManager(context: Context) {
         }
     }
 
+    /**
+     * Opens a SOCKS5 CONNECT to [DNS_PROBE_HOST]:443 *by name* (ATYP 0x03), exactly like Gecko does
+     * with `socks5_remote_dns`. Success proves clearweb hosts resolve at the Tor exit and that the
+     * proxy routes clearweb traffic — the device's own DNS is never asked.
+     */
+    fun verifyRemoteDns() = scope.launch {
+        val port = _status.value.socksPort
+        if (port <= 0) return@launch
+        val ok = socks5ConnectByName(SOCKS_HOST, port, DNS_PROBE_HOST, 443)
+        Log.i(TAG, "remote DNS probe via socks5 ($DNS_PROBE_HOST:443): ${if (ok) "OK" else "FAILED"}")
+        _status.update { it.copy(remoteDns = ok) }
+    }
+
     /** SIGNAL NEWNYM: new circuits for new connections, then re-check the exit IP. */
     fun newIdentity() = scope.launch {
         val control = service?.torControlConnection ?: return@launch
@@ -261,6 +280,7 @@ class TorManager(context: Context) {
             _status.update { it.copy(exitIp = null, verified = false, summary = "NEWNYM sent - rotating circuit") }
             delay(3_000) // tor rate-limits NEWNYM; give it a moment to build fresh circuits
             verifyExit()
+            verifyRemoteDns()
         } catch (e: IOException) {
             Log.w(TAG, "NEWNYM failed: ${e.message}")
         }
@@ -293,6 +313,30 @@ fun probeSocks5(host: String, port: Int, timeoutMs: Int = 3_000): Boolean = try 
         s.getOutputStream().apply { write(byteArrayOf(0x05, 0x01, 0x00)); flush() }
         val reply = ByteArray(2)
         s.getInputStream().read(reply) == 2 && reply[0] == 0x05.toByte() && reply[1] == 0x00.toByte()
+    }
+} catch (e: IOException) {
+    false
+}
+
+/**
+ * RFC 1928 CONNECT with a domain-name address: the proxy (Tor) resolves [host], not us.
+ * Returns true when Tor reports success (REP = 0x00).
+ */
+fun socks5ConnectByName(proxyHost: String, proxyPort: Int, host: String, port: Int, timeoutMs: Int = 30_000): Boolean = try {
+    Socket().use { s ->
+        s.connect(InetSocketAddress(InetAddress.getByName(proxyHost), proxyPort), timeoutMs)
+        s.soTimeout = timeoutMs
+        val out = s.getOutputStream()
+        val inp = s.getInputStream()
+        out.write(byteArrayOf(0x05, 0x01, 0x00)); out.flush()
+        val greet = ByteArray(2)
+        if (inp.read(greet) != 2 || greet[1] != 0x00.toByte()) return@use false
+        val name = host.toByteArray(Charsets.US_ASCII)
+        val req = byteArrayOf(0x05, 0x01, 0x00, 0x03, name.size.toByte()) + name +
+            byteArrayOf((port shr 8).toByte(), port.toByte())
+        out.write(req); out.flush()
+        val reply = ByteArray(2)
+        inp.read(reply) == 2 && reply[0] == 0x05.toByte() && reply[1] == 0x00.toByte()
     }
 } catch (e: IOException) {
     false

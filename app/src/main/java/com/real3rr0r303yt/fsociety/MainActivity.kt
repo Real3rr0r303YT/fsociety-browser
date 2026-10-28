@@ -48,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
@@ -59,6 +60,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import com.real3rr0r303yt.fsociety.engine.BlockStats
 import com.real3rr0r303yt.fsociety.engine.BrowserTab
 import com.real3rr0r303yt.fsociety.engine.TabManager
 import com.real3rr0r303yt.fsociety.tor.TorManager
@@ -139,8 +141,15 @@ private fun BrowserRoot(app: FsocietyApp, onWipeAndExit: () -> Unit) {
             .imePadding(),
     ) {
         AsciiHeader()
-        TorHud(status)
+        TorHud(status, engine as? EngineState.Ready)
         PromptBar(currentUrl = tab?.url.orEmpty(), enabled = browser != null) { browser?.load(it) }
+        tab?.lastError?.let { err ->
+            Text(
+                "[!] $err",
+                color = Fs.BloodRed, fontFamily = Fs.Mono, fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 8.dp),
+            )
+        }
         ActionRow(
             tab = tab,
             status = status,
@@ -193,7 +202,7 @@ private fun AsciiHeader() {
 }
 
 @Composable
-private fun TorHud(s: TorStatus) {
+private fun TorHud(s: TorStatus, engine: EngineState.Ready?) {
     val pulse by rememberInfiniteTransition(label = "pulse").animateFloat(
         initialValue = 1f, targetValue = 0.25f,
         animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "dot",
@@ -222,7 +231,44 @@ private fun TorHud(s: TorStatus) {
         HudSep()
         HudText("SOCKS5:${s.socksHost}:${if (s.socksPort > 0) s.socksPort else "----"}", Fs.DimGreen)
         HudSep()
+        HudText(
+            "DNS:" + when (s.remoteDns) { true -> "REMOTE"; false -> "PROBE-FAIL"; null -> "..." },
+            when (s.remoteDns) { true -> Fs.NeonGreen; false -> Fs.BloodRed; null -> Fs.DimGreen },
+        )
+        HudSep()
         HudText(s.mode.name, Fs.DimGreen)
+    }
+    if (engine != null) ProtectionHud(engine, torPort = s.socksPort)
+}
+
+/** Second HUD line: what ETP / ad blocking the runtime really runs with, plus live block counts. */
+@Composable
+private fun ProtectionHud(engine: EngineState.Ready, torPort: Int) {
+    val p = engine.protection
+    fun flag(on: Boolean) = if (on) "ON" else "OFF"
+    fun tint(on: Boolean) = if (on) Fs.NeonGreen else Fs.BloodRed
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(Fs.Panel)
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+            .horizontalScroll(rememberScrollState()),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        HudText("ETP:${p.etpLevel}", tint(p.etpLevel != "OFF"), bold = true)
+        HudSep()
+        HudText("ADBLOCK:${flag(p.ads)}", tint(p.ads))
+        HudSep()
+        HudText("TRACKERS:${flag(p.trackers)}", tint(p.trackers))
+        HudSep()
+        HudText("FP:${flag(p.fingerprinters)}", tint(p.fingerprinters))
+        HudSep()
+        HudText("BLOCKED ads:${BlockStats.ads} trk:${BlockStats.trackers} other:${BlockStats.other}", Fs.Amber)
+        // The engine's proxy prefs are fixed at creation; a Tor restart on another port breaks routing.
+        if (torPort > 0 && torPort != engine.socksPort) {
+            HudSep()
+            HudText("PORT MISMATCH ${engine.socksPort}!=$torPort - [wipe&exit] + restart", Fs.BloodRed, bold = true)
+        }
     }
 }
 
@@ -240,7 +286,14 @@ private fun PromptBar(currentUrl: String, enabled: Boolean, onSubmit: (String) -
     var field by remember { mutableStateOf(TextFieldValue("")) }
     var editing by remember { mutableStateOf(false) }
     val focus = LocalFocusManager.current
-    LaunchedEffect(currentUrl) { if (!editing) field = TextFieldValue(currentUrl, TextRange(currentUrl.length)) }
+    LaunchedEffect(currentUrl, editing) { if (!editing) field = TextFieldValue(currentUrl) }
+
+    fun submit() {
+        val input = field.text.trim()
+        editing = false
+        focus.clearFocus()
+        if (input.isNotEmpty()) onSubmit(input)
+    }
 
     Row(
         Modifier
@@ -254,7 +307,7 @@ private fun PromptBar(currentUrl: String, enabled: Boolean, onSubmit: (String) -
         Text(":~# ", color = Fs.NeonGreen, fontFamily = Fs.Mono, fontSize = 14.sp)
         BasicTextField(
             value = field,
-            onValueChange = { field = it; editing = true },
+            onValueChange = { field = it },
             enabled = enabled,
             singleLine = true,
             textStyle = MaterialTheme.typography.bodyLarge.copy(color = Fs.NeonGreen),
@@ -264,23 +317,42 @@ private fun PromptBar(currentUrl: String, enabled: Boolean, onSubmit: (String) -
                 imeAction = ImeAction.Go,
                 autoCorrectEnabled = false,
             ),
-            keyboardActions = KeyboardActions(onGo = {
-                onSubmit(field.text)
-                editing = false
-                focus.clearFocus()
-            }),
+            keyboardActions = KeyboardActions(onGo = { submit() }, onDone = { submit() }, onSearch = { submit() }),
             decorationBox = { inner ->
                 Box {
                     if (field.text.isEmpty()) {
                         Text(
-                            if (enabled) "enter url or search (.onion ok)" else "waiting for circuit_",
-                            color = Fs.GhostGreen, fontFamily = Fs.Mono, fontSize = 15.sp,
+                            when {
+                                !enabled -> "waiting for circuit_"
+                                editing && currentUrl.isNotEmpty() -> currentUrl
+                                else -> "enter url or search (.onion ok)"
+                            },
+                            color = Fs.GhostGreen, fontFamily = Fs.Mono, fontSize = 15.sp, maxLines = 1,
                         )
                     }
                     inner()
                 }
             },
-            modifier = Modifier.weight(1f),
+            // Tapping the prompt starts a fresh command line (current URL stays visible as a hint),
+            // so typed input never gets glued onto the old URL.
+            modifier = Modifier
+                .weight(1f)
+                .onFocusChanged { state ->
+                    if (state.isFocused && !editing) {
+                        editing = true
+                        field = TextFieldValue("")
+                    } else if (!state.isFocused && editing) {
+                        editing = false
+                    }
+                },
+        )
+        Text(
+            "[go]",
+            color = if (enabled) Fs.NeonGreen else Fs.GhostGreen,
+            fontFamily = Fs.Mono, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .clickable(enabled = enabled) { submit() }
+                .padding(start = 6.dp, top = 4.dp, bottom = 4.dp),
         )
     }
 }

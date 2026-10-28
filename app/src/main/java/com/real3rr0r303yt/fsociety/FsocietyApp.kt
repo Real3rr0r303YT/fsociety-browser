@@ -3,7 +3,9 @@ package com.real3rr0r303yt.fsociety
 import android.app.Application
 import android.os.Build
 import android.util.Log
+import com.real3rr0r303yt.fsociety.engine.BlockStats
 import com.real3rr0r303yt.fsociety.engine.GeckoEngine
+import com.real3rr0r303yt.fsociety.engine.ProtectionStatus
 import com.real3rr0r303yt.fsociety.engine.TabManager
 import com.real3rr0r303yt.fsociety.tor.TorManager
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,7 +17,7 @@ import java.io.File
 sealed interface EngineState {
     data object Idle : EngineState
     data object Starting : EngineState
-    data class Ready(val tabs: TabManager) : EngineState
+    data class Ready(val tabs: TabManager, val protection: ProtectionStatus, val socksPort: Int) : EngineState
     data class Failed(val reason: String) : EngineState
 }
 
@@ -56,9 +58,11 @@ class FsocietyApp : Application() {
         Log.i(TAG, "starting GeckoView engine via socks5://$socksHost:$socksPort")
         _engine.value = try {
             val runtime = GeckoEngine.obtain(this, socksHost, socksPort)
+            val protection = ProtectionStatus.of(runtime)
+            Log.i(TAG, "content blocking: $protection")
             val tabs = TabManager(runtime) { tor.status.value.ready }
             tabs.newTab(TabManager.HOME)
-            EngineState.Ready(tabs)
+            EngineState.Ready(tabs, protection, socksPort)
         } catch (e: Exception) {
             Log.e(TAG, "GeckoView initialization failed", e)
             EngineState.Failed(e.message ?: e.javaClass.simpleName)
@@ -73,6 +77,7 @@ class FsocietyApp : Application() {
     /** Zero-log teardown: close tabs, clear all Gecko storage, stop Tor, delete the profile. */
     suspend fun wipeEverything() {
         (_engine.value as? EngineState.Ready)?.tabs?.closeAll()
+        BlockStats.reset()
         GeckoEngine.wipe(this)
         tor.stop()
         cacheDir.deleteRecursively()
