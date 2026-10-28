@@ -85,7 +85,7 @@ fsociety-browser/
 
 ## `$ ./gradlew assembleDebug`
 
-Requirements: JDK 17 and the Android SDK (compileSdk 35). Min device is Android 8.0 (API 26).
+Requirements: JDK 17 and the Android SDK (compileSdk 36). Min device is Android 8.0 (API 26).
 
 ```bash
 git clone https://github.com/Real3rr0r303YT/fsociety-browser.git

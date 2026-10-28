@@ -1,6 +1,6 @@
 [versions]
-agp = "8.7.3"
-kotlin = "2.1.0"
+agp = "8.13.0"
+kotlin = "2.2.20"
 coreKtx = "1.15.0"
 activityCompose = "1.9.3"
 lifecycle = "2.8.7"
@@ -10,8 +10,9 @@ localBroadcastManager = "1.1.0"
 # GeckoView release channel. Pin an exact build (e.g. "145.0.20251110xxxxxx") from
 # https://maven.mozilla.org/maven2/org/mozilla/geckoview/geckoview/ for reproducible builds.
 geckoview = "145.+"
-# Guardian Project's embedded tor daemon (org.torproject.jni.TorService) + control-port library.
-torAndroid = "0.4.9.14"
+# Guardian Project's embedded tor daemon. 0.4.9.6 is the newest build that accepts compileSdk 36;
+# 0.4.9.6.2+ require compileSdk 37 (and therefore AGP 9.x).
+torAndroid = "0.4.9.6"
 jtorctl = "0.4.5.7"
 
 [libraries]
