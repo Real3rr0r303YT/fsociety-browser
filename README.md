@@ -17,7 +17,7 @@ A Tor-rerouted, zero-log, hardened privacy browser for Android, built on Mozilla
 ![Platform](https://img.shields.io/badge/platform-Android%208.0%2B-00FF66?style=flat-square&labelColor=000000)
 ![Engine](https://img.shields.io/badge/engine-GeckoView-8B0000?style=flat-square&labelColor=000000)
 ![Network](https://img.shields.io/badge/network-Tor%20SOCKS5-8B0000?style=flat-square&labelColor=000000)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?style=flat-square&logo=buymeacoffee&logoColor=black&labelColor=000000)](https://buymeacoffee.com/real3rr0r303yt)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?style=flat-square&logo=buymeacoffee&logoColor=black&labelColor=000000)](https://buymeacoffee.com/3rr0r303YT)
 
 </div>
 
@@ -115,7 +115,7 @@ Found a leak? See [SECURITY.md](SECURITY.md).
 
 If this project helped you stay invisible, fuel the next commit:
 
-<a href="https://buymeacoffee.com/real3rr0r303yt"><img src="https://img.shields.io/badge/☕%20Buy%20Me%20a%20Coffee-real3rr0r303yt-FFDD00?style=for-the-badge&labelColor=000000" alt="Buy Me a Coffee"></a>
+<a href="https://buymeacoffee.com/3rr0r303YT"><img src="https://img.shields.io/badge/☕%20Buy%20Me%20a%20Coffee-3rr0r303YT-FFDD00?style=for-the-badge&labelColor=000000" alt="Buy Me a Coffee"></a>
 
 ## `$ cat LICENSE`
 
@@ -146,3 +146,7 @@ fsociety@root:~# exit
 ```
 
 </div>
+
+---
+
+<p align="center"><b>Made by <a href="https://github.com/Real3rr0r303YT">Real3rr0r303YT</a></b></p>
